@@ -1,0 +1,177 @@
+--- a/drivers/spi/spi-rb4xx.c
++++ b/drivers/spi/spi-rb4xx.c
+@@ -18,12 +18,15 @@
+ #include <linux/platform_device.h>
+ #include <linux/clk.h>
+ #include <linux/spi/spi.h>
++#include <linux/spi/spi-mem.h>
+ #include <linux/of.h>
+ 
+ #include <asm/mach-ath79/ar71xx_regs.h>
+ 
+ struct rb4xx_spi {
+ 	void __iomem *base;
++	void __iomem *nand;
++	size_t flash_size;
+ 	struct clk *clk;
+ };
+ 
+@@ -39,9 +42,8 @@ static inline void rb4xx_write(struct rb
+ 
+ static inline void do_spi_clk(struct rb4xx_spi *rbspi, u32 spi_ioc, int value)
+ {
+-	u32 regval;
++	u32 regval = spi_ioc;
+ 
+-	regval = spi_ioc;
+ 	if (value & BIT(0))
+ 		regval |= AR71XX_SPI_IOC_DO;
+ 
+@@ -61,9 +63,8 @@ static void do_spi_byte(struct rb4xx_spi
+ static inline void do_spi_clk_two(struct rb4xx_spi *rbspi, u32 spi_ioc,
+ 				   u8 value)
+ {
+-	u32 regval;
++	u32 regval = spi_ioc;
+ 
+-	regval = spi_ioc;
+ 	if (value & BIT(1))
+ 		regval |= AR71XX_SPI_IOC_DO;
+ 	if (value & BIT(0))
+@@ -135,28 +136,46 @@ static int rb4xx_transfer_one(struct spi
+ 	return 0;
+ }
+ 
++static int rb4xx_mem_exec_op(struct spi_mem *mem, const struct spi_mem_op *op)
++{
++	struct rb4xx_spi *rbspi = spi_master_get_devdata(mem->spi->master);
++
++	/* Only accept CPLD opcode 0xff - TODO need something better... */
++	if (!op->data.nbytes || op->data.dir != SPI_MEM_DATA_IN ||
++	    op->cmd.opcode != 0xff)
++		return -ENOTSUPP;
++
++	/* Check within window size */
++	if (op->data.nbytes > rbspi->flash_size)
++		return -ENOTSUPP;
++
++	rb4xx_write(rbspi, AR71XX_SPI_REG_FS,   AR71XX_SPI_FS_GPIO);
++	rb4xx_write(rbspi, AR71XX_SPI_REG_CTRL, AR71XX_SPI_CTRL_RD | 2); // 12Mb & clock divider
++
++	rb4xx_write(rbspi, AR71XX_SPI_REG_FS,   0);
++	memcpy_fromio(op->data.buf.in, rbspi->nand, op->data.nbytes);
++	rb4xx_write(rbspi, AR71XX_SPI_REG_FS,   AR71XX_SPI_FS_GPIO);
++
++	rb4xx_write(rbspi, AR71XX_SPI_REG_CTRL, AR71XX_SPI_CTRL_RD | 5);
++	return 0;
++}
++
++static const struct spi_controller_mem_ops rb4xx_mem_ops = {
++	.exec_op = rb4xx_mem_exec_op,
++	// TODO .adjust_op_size = ... if there's an upper bound on the mmap
++};
++
+ static int rb4xx_spi_probe(struct platform_device *pdev)
+ {
+ 	struct spi_master *master;
+-	struct clk *ahb_clk;
+ 	struct rb4xx_spi *rbspi;
+ 	struct resource *r;
+-	int err;
+-	void __iomem *spi_base;
+-
+-	r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
+-	spi_base = devm_ioremap_resource(&pdev->dev, r);
+-	if (IS_ERR(spi_base))
+-		return PTR_ERR(spi_base);
++	int err = 0;
+ 
+ 	master = spi_alloc_master(&pdev->dev, sizeof(*rbspi));
+ 	if (!master)
+ 		return -ENOMEM;
+ 
+-	ahb_clk = devm_clk_get(&pdev->dev, "ahb");
+-	if (IS_ERR(ahb_clk))
+-		return PTR_ERR(ahb_clk);
+-
+ 	master->dev.of_node = pdev->dev.of_node;
+ 	master->bus_num = 0;
+ 	master->num_chipselect = 3;
+@@ -167,23 +186,72 @@ static int rb4xx_spi_probe(struct platfo
+ 	master->set_cs = rb4xx_set_cs;
+ 
+ 	rbspi = spi_master_get_devdata(master);
+-	rbspi->base = spi_base;
+-	rbspi->clk = ahb_clk;
+ 	platform_set_drvdata(pdev, rbspi);
+ 
++	r = platform_get_resource_byname(pdev, IORESOURCE_MEM, "spi_base");
++	if (r == NULL) {
++		r = platform_get_resource(pdev, IORESOURCE_MEM, 0);
++		if (r == NULL) {
++			dev_err(&pdev->dev, "missing platform data\n");
++			return -ENODEV;
++		}
++	}
++	rbspi->base = devm_ioremap_resource(&pdev->dev, r);
++	if (IS_ERR(rbspi->base))
++		return PTR_ERR(rbspi->base);
++
++	/* optional nand memory map */
++	r = platform_get_resource_byname(pdev, IORESOURCE_MEM, "spi_nand");
++	if (r == NULL) {
++		r = platform_get_resource(pdev, IORESOURCE_MEM, 1);
++	}
++	if (r != NULL) {
++		rbspi->nand = devm_ioremap_resource(&pdev->dev, r);
++		rbspi->flash_size = resource_size(r);
++		if (rbspi->nand && !IS_ERR(rbspi->nand))
++			master->mem_ops = &rb4xx_mem_ops;
++	}
++	if (master->mem_ops == NULL)
++		dev_err(&pdev->dev, "nand memory resource missing / failed\n");
++
++	rbspi->clk = devm_clk_get(&pdev->dev, "ahb");
++	if (IS_ERR(rbspi->clk))
++		return PTR_ERR(rbspi->clk);
++
+ 	err = devm_spi_register_master(&pdev->dev, master);
+ 	if (err) {
+ 		dev_err(&pdev->dev, "failed to register SPI master\n");
+ 		return err;
+ 	}
+ 
+-	err = clk_prepare_enable(ahb_clk);
+-	if (err)
++	err = clk_prepare_enable(rbspi->clk);
++	if (err) {
++		dev_err(&pdev->dev, "failed to enable ahb clock\n");
+ 		return err;
++	}
++
++	/* TODO Mikrotik stuff
++	// Prints: RB4XX ahb clock: 170000000 Hz
++	printk("RB4XX ahb clock: %ld Hz\n", clk_get_rate(rbspi->clk));
++
++	unsigned ahb_clock = clk_get_rate(rbspi->clk);
++	unsigned div = (ahb_clock - 1) / (2 * 33333334);
++	if (div == 0)
++		++div;
++	unsigned ahb_khz = (ahb_clock + 500) / 1000;
++	unsigned div_real = 2 * (div + 1);
++
++	// Prints: SPI clock 28333 kHz (AHB 170000 kHz / 6)
++	printk("SPI clock %u kHz (AHB %u kHz / %u)\n",
++	       ahb_khz / div_real,
++	       ahb_khz, div_real);
++
++	// Prints: RB4XX clock divider: 42
++	printk("RB4XX clock divider: %x\n", 0x40 + div);
++	*/
+ 
+ 	/* Enable SPI */
+ 	rb4xx_write(rbspi, AR71XX_SPI_REG_FS, AR71XX_SPI_FS_GPIO);
+-
+ 	return 0;
+ }
+ 

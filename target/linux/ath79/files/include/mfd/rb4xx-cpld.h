@@ -13,7 +13,9 @@
 #include <linux/spi/spi.h>
 
 struct rb4xx_cpld {
+	struct spi_mem *spimem;
 	struct spi_device *spi;
+	long foo;
 
 	int (*write_nand)(struct rb4xx_cpld *self, const void *tx_buf,
 			  unsigned int len);

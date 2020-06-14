@@ -69,12 +69,16 @@
 	status = "okay";
 
 	compatible = "mikrotik,rb4xx-spi";
+	reg = <0x1f000000 0x10>,
+	      <0x1f800000 0x800000>;
+	reg-names = "spi_base", "spi_nand";
 
 	flash@0 {
 		compatible = "pm25lv512", "jedec,spi-nor";
 
 		reg = <0>;
-		spi-max-frequency = <25000000>;
+		spi-max-frequency = <33333334>;
+		//spi-max-frequency = <25000000>;
 
 		partitions {
 			compatible = "mikrotik,routerboot-partitions";
@@ -113,7 +117,8 @@
 		compatible = "mikrotik,rb4xx-cpld";
 
 		reg = <1>;
-		spi-max-frequency = <25000000>;
+		spi-max-frequency = <33333334>;
+		//spi-max-frequency = <25000000>;
 
 		cpld_gpio: gpio {
 			compatible = "mikrotik,rb4xx-gpio";

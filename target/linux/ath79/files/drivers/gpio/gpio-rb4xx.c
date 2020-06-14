@@ -50,11 +50,12 @@ static int rb4xx_gpio_cpld_set(struct rb4xx_gpio *gpio, unsigned int offset,
 		goto unlock;
 	}
 
-	if (offset < 8) {
+	if (offset < 8)
 		ret = cpld->gpio_set_0_7(cpld, values & 0xff);
-	} else if (offset == 8) {
+	else if (offset == 8)
 		ret = cpld->gpio_set_8(cpld, values >> 8);
-	}
+	else
+		ret = -EINVAL;
 
 	if(likely(!ret))
 		gpio->values = values;
